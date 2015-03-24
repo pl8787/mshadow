@@ -27,7 +27,7 @@
 #endif
 /*! \brief whether do padding during allocation */
 #ifndef MSHADOW_ALLOC_PAD
-#define MSHADOW_ALLOC_PAD true
+#define MSHADOW_ALLOC_PAD false
 #endif
 /*!
  * \brief 
