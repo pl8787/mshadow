@@ -17,68 +17,59 @@ inline void InitTensorEngine<gpu>(int dev_id) {
   int device_id = 0;
   int device_count = 0;
   cudaGetDeviceCount(&device_count);
-  utils::Check(device_count > 0,
-               "Cannot find CUDA device. Please check CUDA-Configuration");
+  CHECK_GT(device_count, 0) << "Cannot find CUDA device. Please check CUDA-Configuration";
   if (dev_id < 0) {
     device_id = 0;
   } else {
     device_id = dev_id;
   }
-  utils::Check(device_id < device_count, "Incorrect Device ID");
-  utils::Check(cudaSetDevice(device_id) == cudaSuccess, "cannot set device");
-  cudaGetDeviceProperties(&prop, device_id);
-  printf("Use CUDA Device %d: %s\n", device_id, prop.name);
-  cublasInit();
+  CHECK_LT(device_id, device_count) << "Incorrect Device ID";
+  MSHADOW_CUDA_CALL(cudaSetDevice(device_id));
+  MSHADOW_CUDA_CALL(cudaGetDeviceProperties(&prop, device_id));
 }
 template<>
 inline void ShutdownTensorEngine<gpu>(void) {
-  cublasShutdown();
 }
 template<>
 inline void SetDevice<gpu>(int devid) {
-  utils::Check(cudaSetDevice(devid) == cudaSuccess, "cannot set device"); 
+  MSHADOW_CUDA_CALL(cudaSetDevice(devid));
 }
 template<int dim, typename DType>
 inline void AllocSpace(Tensor<gpu, dim, DType> *obj, bool pad) {
   size_t pitch;
   // common choice for cuda mem align unit is 32
   if (pad && obj->size(dim - 1) >= MSHADOW_MIN_PAD_RATIO * 32) {
-    cudaError_t err =
-        cudaMallocPitch(reinterpret_cast<void**>(&(obj->dptr_)), &pitch,
-                        obj->size(dim - 1) * sizeof(DType),
-                        obj->shape_.FlatTo2D()[0]);
-    utils::Check(err == cudaSuccess, cudaGetErrorString(err));
+    MSHADOW_CUDA_CALL(cudaMallocPitch(reinterpret_cast<void**>(&(obj->dptr_)), &pitch,
+                                      obj->size(dim - 1) * sizeof(DType),
+                                      obj->shape_.FlatTo2D()[0]));
     obj->stride_ = static_cast<index_t>(pitch / sizeof(DType));
   } else {
     obj->stride_ = obj->size(dim - 1);
-    cudaError_t err =
-        cudaMallocPitch(reinterpret_cast<void**>(&(obj->dptr_)), &pitch,
-                        obj->shape_.Size() * sizeof(DType), 1);
-    utils::Check(err == cudaSuccess, cudaGetErrorString(err));
+    MSHADOW_CUDA_CALL(cudaMallocPitch(reinterpret_cast<void**>(&(obj->dptr_)), &pitch,
+                                      obj->shape_.Size() * sizeof(DType), 1));
   }
 }
 template<int dim, typename DType>
 inline void FreeSpace(Tensor<gpu, dim, DType> *obj) {
-  cudaFree(obj->dptr_); obj->dptr_ = NULL;
+  MSHADOW_CUDA_CALL(cudaFree(obj->dptr_));
+  obj->dptr_ = NULL;
 }
 template<typename A, typename B, int dim, typename DType>
 inline void Copy(Tensor<A, dim, DType> _dst,
                  Tensor<B, dim, DType> _src,
                  cudaMemcpyKind kind,
                  Stream<gpu> *stream) {
-  utils::Check(_dst.shape_ == _src.shape_, "Copy:shape mismatch");
+  CHECK_EQ(_dst.shape_, _src.shape_) << "Copy:shape mismatch";
   Tensor<A, 2, DType> dst = _dst.FlatTo2D();
   Tensor<B, 2, DType> src = _src.FlatTo2D();
-  cudaError_t err = cudaMemcpy2DAsync(dst.dptr_, dst.stride_ * sizeof(DType),
+  MSHADOW_CUDA_CALL(cudaMemcpy2DAsync(dst.dptr_, dst.stride_ * sizeof(DType),
                                       src.dptr_, src.stride_ * sizeof(DType),
                                       dst.size(1) * sizeof(DType),
                                       dst.size(0), kind,
-                                      Stream<gpu>::GetStream(stream));
-  utils::Check(err == cudaSuccess, cudaGetErrorString(err));
+                                      Stream<gpu>::GetStream(stream)));
   // use synchronize call behavior for zero stream
   if (stream == NULL) {
-    err = cudaStreamSynchronize(0);
-    utils::Check(err == cudaSuccess, cudaGetErrorString(err));
+    MSHADOW_CUDA_CALL(cudaStreamSynchronize(0));
   }
 }
 template<int dim, typename DType>
@@ -115,8 +106,9 @@ inline void MapExp(TRValue<R, gpu, dim, DType> *dst,
       ::Error_All_Tensor_in_Exp_Must_Have_Same_Type();
   Shape<dim> eshape = expr::ShapeCheck<dim, E>::Check(exp.self());
   Shape<dim> dshape = expr::ShapeCheck<dim, R>::Check(dst->self());
-  utils::Check(eshape[0] == 0 || eshape == dshape,
-               "Assignment: Shape of Tensors are not consistent with target");
+  CHECK(eshape[0] == 0 || eshape == dshape)
+    << "Assignment: Shape of Tensors are not consistent with target, "
+    << "eshape: " << eshape << " dshape:" << dshape;
   cuda::MapPlan<Saver>(MakePlan(dst->self()),
                        MakePlan(exp.self()),
                        dshape.FlatTo2D(),
@@ -132,10 +124,9 @@ inline void MapReduceKeepLowest(TRValue<R, gpu, 1, DType> *dst,
       ::Error_TypeCheck_Not_Pass_For_Reduce_Exp();
   Shape<2> eshape = expr::ShapeCheck<expr::ExpInfo<E>::kDim, E>
       ::Check(exp.self()).FlatTo2D();
-  Shape<1> dshape = expr::ShapeCheck<1, R>::Check(dst->self());  
-  utils::Check(eshape[1] == dshape[0],
-               "MapReduceKeepLowest::reduction dimension do not match");
-  utils::Check(eshape[0] != 0, "can not reduce over empty tensor");
+  Shape<1> dshape = expr::ShapeCheck<1, R>::Check(dst->self());
+  CHECK_EQ(eshape[1], dshape[0]) << "MapReduceKeepLowest::reduction dimension do not match";
+  CHECK_NE(eshape[0], 0) << "can not reduce over empty tensor";
   cuda::MapReduceKeepLowest<Saver, Reducer>
       (MakePlan(dst->self()), MakePlan(exp.self()), scale, eshape,
        Stream<gpu>::GetStream(expr::StreamInfo<gpu, R>::Get(dst->self())));
@@ -151,9 +142,8 @@ inline void MapReduceKeepHighDim(TRValue<R, gpu, 1, DType> *dst,
   typedef Shape<expr::ExpInfo<E>::kDim> EShape;
   EShape eshape = expr::ShapeCheck<expr::ExpInfo<E>::kDim, E>
       ::Check(exp.self());
-    Shape<1> dshape = expr::ShapeCheck<1, R>::Check(dst->self());  
-  utils::Check(eshape[dimkeep] == dshape[0],
-               "MapReduceKeepHighDim::reduction dimension do not match");
+    Shape<1> dshape = expr::ShapeCheck<1, R>::Check(dst->self());
+  CHECK_EQ(eshape[dimkeep], dshape[0]) << "MapReduceKeepHighDim::reduction dimension do not match";
   // use equvalent form
   Shape<4> pshape = Shape4(eshape.ProdShape(0, dimkeep),
                            eshape[dimkeep],
@@ -168,6 +158,62 @@ template<typename DType>
 inline void Softmax(Tensor<gpu, 2, DType> dst,
                     const Tensor<gpu, 2, DType>& src) {
   cuda::Softmax(dst, src);
+}
+
+template<typename DType>
+inline void Softmax(Tensor<gpu, 3, DType> dst,
+                    const Tensor<gpu, 3, DType>& src) {
+  cuda::Softmax(dst, src);
+}
+
+template<typename DType>
+inline void SoftmaxGrad(Tensor<gpu, 2, DType> dst,
+                        const Tensor<gpu, 2, DType> &src,
+                        const Tensor<gpu, 1, DType> &label) {
+  cuda::SoftmaxGrad(dst, src, label);
+}
+
+template<typename DType>
+inline void SoftmaxGrad(Tensor<gpu, 2, DType> dst,
+                        const Tensor<gpu, 2, DType> &src,
+                        const Tensor<gpu, 1, DType> &label,
+                        const DType &ignore_label) {
+  cuda::SoftmaxGrad(dst, src, label, ignore_label);
+}
+
+template<typename DType>
+inline void SoftmaxGrad(Tensor<gpu, 3, DType> dst,
+                        const Tensor<gpu, 3, DType> &src,
+                        const Tensor<gpu, 2, DType> &label) {
+  cuda::SoftmaxGrad(dst, src, label);
+}
+
+template<typename DType>
+inline void SoftmaxGrad(Tensor<gpu, 3, DType> dst,
+                        const Tensor<gpu, 3, DType> &src,
+                        const Tensor<gpu, 2, DType> &label,
+                        const DType &ignore_label) {
+  cuda::SoftmaxGrad(dst, src, label, ignore_label);
+}
+
+template<typename IndexType, typename DType>
+inline void AddTakeGrad(Tensor<gpu, 2, DType> dst,
+                        const Tensor<gpu, 1, IndexType>& index,
+                        const Tensor<gpu, 2, DType> &src) {
+  cuda::AddTakeGrad(dst, index, src);
+}
+
+template<typename IndexType, typename DType>
+inline void AddTakeGradLargeBatch(Tensor<gpu, 2, DType> dst,
+                                  const Tensor<gpu, 1, IndexType>& sorted,
+                                  const Tensor<gpu, 1, IndexType>& index,
+                                  const Tensor<gpu, 2, DType> &src) {
+  cuda::AddTakeGradLargeBatch(dst, sorted, index, src);
+}
+template<typename KDType, typename VDType>
+inline void SortByKey(Tensor<gpu, 1, KDType> keys, Tensor<gpu, 1, VDType> values,
+                      bool is_ascend) {
+  cuda::SortByKey(keys, values, is_ascend);
 }
 }  // namespace mshadow
 #endif  // __CUDACC__

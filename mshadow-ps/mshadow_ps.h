@@ -1,14 +1,14 @@
 /*!
  *  Copyright (c) 2014 by Contributors
- * \file ps.h
+ * \file mshadow_ps.h
  * \brief parameter server abstraction for mshadow tensor
  *  this is a plugin of mshadow that can be used to syncrhonize
  *  parameters across device and machines
  *
  * \author Tianqi Chen, Mu Li
  */
-#ifndef MSHADOW_PS_H_
-#define MSHADOW_PS_H_
+#ifndef MSHADOW_PS_H_  // NOLINT(*)
+#define MSHADOW_PS_H_  // NOLINT(*)
 #include <vector>
 // optionally support of lambda function in C++11, if available
 #if __cplusplus >= 201103L
@@ -19,6 +19,11 @@
 /*! \brief whether to adapt distributed PS from parameter-server */
 #ifndef MSHADOW_DIST_PS
 #define MSHADOW_DIST_PS 1
+#endif
+
+/*! \brief whether to support BSP rabit API of PS*/
+#ifndef MSHADOW_RABIT_PS
+#define MSHADOW_RABIT_PS 1
 #endif
 
 namespace mshadow {
@@ -155,9 +160,9 @@ class ISharedModel {
    * \param devid the device id this tensor lies in
    * \param priority the priority of this operation,
    *   the bigger the number is the higher the priority will be
-   * \param callback the callback function 
+   * \param callback the callback function
    */
-  template<int dim>  
+  template<int dim>
   inline void PullReq(Tensor<xpu, dim, DType> data,
                       int key,
                       int devid,
@@ -174,7 +179,7 @@ class ISharedModel {
    * \brief set weight of corresponding key in server
    *   this is a debug function that was not necessarily
    *   implemented by the server
-   * \param shape the shape content of the key
+   * \param data the data to set
    * \param key the unique key to indicate the tensor
    *        this is unique per device
    * \param devid the device id this tensor lies in
@@ -186,7 +191,7 @@ class ISharedModel {
    * \brief check if the weight matches the server side
    *   this is a debug function that was not necessarily
    *   implemented by the server
-   * \param shape the shape content of the key
+   * \param data the data to set
    * \param key the unique key to indicate the tensor
    *        this is unique per device
    * \param devid the device id this tensor lies in
@@ -194,6 +199,7 @@ class ISharedModel {
   virtual void CheckWeight_(Tensor<xpu, 2, DType> data,
                             int key,
                             int devid) = 0;
+
  protected:
   /*!
    * \brief initialize a key with certain shape
@@ -266,9 +272,10 @@ class IModelUpdater {
   /*!
    * \brief init the model updater
    * \param rank the rank of the node
-   * \param conf configuration
+   * \param argc number of arguments
+   * \param argv arguments
    */
-  virtual void InitUpdater(int rank, const std::string &conf) {}
+  virtual void InitUpdater(int rank, int argc, char *argv[]) {}
   /*!
    * \brief initialize the model
    * \param key the key of data we point to
@@ -285,7 +292,7 @@ class IModelUpdater {
    * \param size size of the parameter key
    */
   virtual void Update(int key, DType *dptr, size_t size) {
-    this->Update_(key, Tensor<cpu, 1, DType>(dptr, Shape1(size)));    
+    this->Update_(key, Tensor<cpu, 1, DType>(dptr, Shape1(size)));
   }
 
  protected:
@@ -296,7 +303,7 @@ class IModelUpdater {
    * \param data the tensor data corresponding to the data we want to initialize
    */
   virtual void InitModel_(int key, Tensor<cpu, 1, DType> data) {
-    utils::Error("InitModel: not implemented");
+    LOG(FATAL) << "InitModel: not implemented";
   }
   /*!
    * \brief update the model, user can implement this one
@@ -305,8 +312,8 @@ class IModelUpdater {
    * \param data the tensor data corresponding to the data we want to initialize
    */
   virtual void Update_(int key, Tensor<cpu, 1, DType> data) {
-    utils::Error("InitModel: not implemented");
-  }  
+    LOG(FATAL) << "InitModel: not implemented";
+  }
 };
 /*!
  * \brief create customized server
@@ -320,6 +327,7 @@ IModelUpdater<DType> *CreateModelUpdater(void);
 
 #include "./ps_local-inl.h"
 #include "./ps_dist-inl.h"
+#include "./ps_rabit-inl.h"
 namespace mshadow {
 namespace ps {
 /*!
@@ -330,13 +338,21 @@ namespace ps {
  */
 template<typename xpu, typename DType>
 inline ISharedModel<xpu, DType> *CreateSharedModel(const char *type) {
-  if (!strcmp("local", type)) return new LocalModel<xpu, DType>();
+  if (!strcmp("local", type)) {
+#if MSHADOW_RABIT_PS
+    // allreduce on one machine pays no cost
+    if (rabit::IsDistributed()) {
+      return new RabitModel<xpu, DType>();
+    }
+#endif
+    return new LocalModel<xpu, DType>();
+  }
 #if MSHADOW_DIST_PS
   if (!strcmp("dist", type)) return new DistModel<xpu, DType>();
 #endif
-  utils::Error("unknown server type %s\n", type);
+  LOG(FATAL) << "unknown server type " << type;
   return NULL;
 }
 }  // namespace ps
 }  // namespace mshadow
-#endif
+#endif  // MSHADOW_PS_H_  NOLINT(*)

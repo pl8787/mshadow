@@ -1,12 +1,15 @@
-#ifndef MSHADOW_PS_THREAD_UTIL_H_
-#define MSHADOW_PS_THREAD_UTIL_H_
 /*!
+ * Copyright by Contributors
  * \file thread_util.h
  * \brief data structures for multi-threading communication
  * \author Tianqi Chen
  */
+#ifndef MSHADOW_PS_THREAD_UTIL_H_  // NOLINT(*)
+#define MSHADOW_PS_THREAD_UTIL_H_  // NOLINT(*)
+
 #include <utility>
 #include <queue>
+#include <map>
 #include "./thread.h"
 namespace mshadow {
 namespace utils {
@@ -18,8 +21,12 @@ namespace utils {
 template<typename DType>
 class ThreadPQueue {
  public:
+  // constructor
+  ThreadPQueue() : use_fifo_(false) {
+  }
   /*! \brief intitialize the queue, must call this before use */
-  inline void Init(void) {
+  inline void Init(bool use_fifo = false) {
+    use_fifo_ = use_fifo;
     lock_.Init();
     counter_.Init(0);
   }
@@ -36,9 +43,9 @@ class ThreadPQueue {
    *  could be waiting on the queue
    */
   inline void Abort(int max_nthread = 1) {
-    for (int i = 0; i < max_nthread; ++ i) {
+    for (int i = 0; i < max_nthread; ++i) {
       counter_.Post();
-    }   
+    }
   }
   /*!
    * \brief push an element to the queue
@@ -48,9 +55,13 @@ class ThreadPQueue {
    */
   inline void Push(const DType &data, int priority = 0) {
     lock_.Lock();
-    queue_.push(Entry(data, priority));
+    if (use_fifo_) {
+      fqueue_.push(data);
+    } else {
+      pqueue_.push(Entry(data, priority));
+    }
     lock_.Unlock();
-    counter_.Post();    
+    counter_.Post();
   }
   /*!
    * \brief pop an element from the queue
@@ -62,12 +73,24 @@ class ThreadPQueue {
   inline bool Pop(DType *data_out) {
     counter_.Wait();
     lock_.Lock();
-    if (queue_.size() == 0) {
-      lock_.Unlock(); return false;
+    if (use_fifo_) {
+      if (fqueue_.size() == 0) {
+        lock_.Unlock(); return false;
+      }
+    } else {
+      if (pqueue_.size() == 0) {
+        lock_.Unlock(); return false;
+      }
     }
-    utils::Assert(queue_.size() != 0, "Queue.Pop");
-    *data_out = queue_.top().data;
-    queue_.pop();
+    if (use_fifo_) {
+      CHECK_NE(fqueue_.size(), 0) << "Queue.Pop";
+      *data_out = fqueue_.front();
+      fqueue_.pop();
+    } else {
+      CHECK_NE(pqueue_.size(), 0) << "Queue.Pop";
+      *data_out = pqueue_.top().data;
+      pqueue_.pop();
+    }
     lock_.Unlock();
     return true;
   }
@@ -83,9 +106,12 @@ class ThreadPQueue {
       return priority < b.priority;
     }
   };
-
-  // the queue to push
-  std::priority_queue<Entry> queue_;
+  // whether use FIFO queue
+  bool use_fifo_;
+  // a priority queue
+  std::priority_queue<Entry> pqueue_;
+  // a FIFO queue
+  std::queue<DType> fqueue_;
   // lock for accessing the queue
   utils::Mutex lock_;
   // counter to count number of push tasks
@@ -109,7 +135,7 @@ class ThreadSafeMap {
   inline TValue *Get(int key) {
     TValue *ret;
     lock_.Lock();
-    typename std::map<int, TValue*>::const_iterator 
+    typename std::map<int, TValue*>::const_iterator
         it = map_.find(key);
     if (it == map_.end() || it->first != key) {
       ret = NULL;
@@ -121,7 +147,7 @@ class ThreadSafeMap {
   }
   inline TValue &GetRef(int key) {
     TValue *ret = this->Get(key);
-    utils::Assert(ret != NULL, "key=%d does not exist", key);
+    CHECK_NE(ret, NULL) << "key = " << key << " does not exist";
     return *ret;
   }
   inline void Init(int key) {

@@ -49,8 +49,8 @@ const int kComplex = 7;
 template<typename Saver, typename RValue, typename DType>
 struct ExpEngine;
 /*! \brief defines how expression exp can be evaluated and stored into dst */
-//template<typename EType>
-//inline static void Eval(RValue *dst, const EType &exp);
+// template<typename EType>
+// inline static void Eval(RValue *dst, const EType &exp);
 /*!
  * \brief base class for expression
  * \tparam SubType inheritated class must put their type into this parameter
@@ -78,7 +78,7 @@ struct ScalarExp: public Exp<ScalarExp<DType>, DType, type::kMapper> {
   /*! \brief scalar value */
   DType scalar_;
   /*! \brief implicit constructor, MUST NOT BE explicit */
-  ScalarExp(DType scalar) : scalar_(scalar) {}
+  ScalarExp(DType scalar) : scalar_(scalar) {}  // NOLINT(*)
 };
 /*! \brief create an scalar expression */
 template<typename DType>
@@ -221,25 +221,32 @@ struct DotExp: public Exp<DotExp<TA, TB, ltrans, rtrans, DType>,
 template<typename TA, typename TB, typename DType>
 inline DotExp<TA, TB, false, false, DType>
 dot(const RValueExp<TA, DType> &lhs, const RValueExp<TB, DType> &rhs) {
-  return DotExp<TA, TB, false, false, DType>(lhs.self(), rhs.self(), 1.0f);
+  return DotExp<TA, TB, false, false, DType>(lhs.self(), rhs.self(), DType(1.0f));
 }
 /*! \brief dot operator def */
 template<typename TA, typename TB, typename DType>
 inline DotExp<TA, TB, true, false, DType>
 dot(const TransposeExp<TA, DType> &lhs, const RValueExp<TB, DType> &rhs) {
-  return DotExp<TA, TB, true, false, DType>(lhs.exp, rhs.self(), 1.0f);
+  return DotExp<TA, TB, true, false, DType>(lhs.exp, rhs.self(), DType(1.0f));
 }
 /*! \brief dot operator def */
 template<typename TA, typename TB, typename DType>
 inline DotExp<TA, TB, false, true, DType>
 dot(const RValueExp<TA, DType> &lhs, const TransposeExp<TB, DType> &rhs) {
-  return DotExp<TA, TB, false, true, DType>(lhs.self(), rhs.exp, 1.0f);
+  return DotExp<TA, TB, false, true, DType>(lhs.self(), rhs.exp, DType(1.0f));
 }
 /*! \brief dot operator def */
 template<typename TA, typename TB, typename DType>
 inline DotExp<TA, TB, true, true, DType>
 dot(const TransposeExp<TA, DType> &lhs, const TransposeExp<TB, DType> &rhs) {
-  return DotExp<TA, TB, true, true, DType>(lhs.exp, rhs.exp, 1.0f);
+  return DotExp<TA, TB, true, true, DType>(lhs.exp, rhs.exp, DType(1.0f));
+}
+/*! \brief batch_dot operator def */
+template<bool transpose_left, bool transpose_right, typename TA, typename TB, typename DType>
+inline DotExp<TA, TB, transpose_left, transpose_right, DType>
+batch_dot(const RValueExp<TA, DType> &lhs, const RValueExp<TB, DType> &rhs) {
+  return DotExp<TA, TB, transpose_left, transpose_right, DType>(
+    lhs.self(), rhs.self(), DType(1.0f));
 }
 //---------------
 // BinaryMapExp

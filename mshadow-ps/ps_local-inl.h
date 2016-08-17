@@ -5,10 +5,12 @@
  *
  * \author Tianqi Chen, Mu Li
  */
-#ifndef MSHADOW_PS_LOCAL_INL_H_
-#define MSHADOW_PS_LOCAL_INL_H_
+#ifndef MSHADOW_PS_LOCAL_INL_H_  // NOLINT(*)
+#define MSHADOW_PS_LOCAL_INL_H_  // NOLINT(*)
 #include <map>
 #include <utility>
+#include <string>
+#include <vector>
 #if defined(_OPENMP)
 #include <omp.h>
 #ifdef _MSC_VER
@@ -35,6 +37,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
     init_end = 0;
     perdev_pull_thread = 1;
     perdev_push_thread = 1;
+    use_fifo_push_queue = 0;
     bigarray_bound = 1000 * 1000;
     nthread_reduction = 8;
     use_pin_memory = 1;
@@ -45,6 +48,9 @@ class LocalModel : public ISharedModel<xpu, DType> {
   }
   // destructor
   virtual ~LocalModel(void) {
+    this->Destroy();
+  }
+  inline void Destroy(void) {
     if (init_end != 0) {
       destroy_signal = true;
       for (size_t i = 0; i < push_queues.size(); ++i) {
@@ -71,8 +77,12 @@ class LocalModel : public ISharedModel<xpu, DType> {
       request_lock.Destroy();
       wait_lock.Destroy();
       wait_cond.Destroy();
+      init_end = 0;
     }
-    if (custom_server != NULL) delete custom_server;
+    if (custom_server != NULL) {
+      delete custom_server;
+      custom_server = NULL;
+    }
   }
   virtual void SetParam(const char *name, const char *val) {
     int key;
@@ -86,7 +96,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
       if (!strcmp(val, "sum")) {
         push_operation[key] = kSum; return;
       }
-      utils::Error("unknown push operation %s", val);
+      LOG(FATAL) << "unknown push operation " << val;
     }
     if (!strcmp(name, "reduce_thread")) {
       nthread_reduction = atoi(val);
@@ -103,8 +113,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
       } else if (!strcmp(val, "one")) {
         perdev_pull_thread = 0;
       } else {
-        utils::Error("invalid value for parameter pull_thread,"\
-                     " can only be ndev or one");
+        LOG(FATAL) << "invalid value for parameter pull_thread," << " can only be ndev or one";
       }
     }
     if (!strcmp(name, "push_thread")) {
@@ -113,8 +122,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
       } else if (!strcmp(val, "one")) {
         perdev_push_thread = 0;
       } else {
-        utils::Error("invalid value for parameter push_thread,"\
-                     " can only be ndev or one");
+        LOG(FATAL) << "invalid value for parameter push_thread," << " can only be ndev or one";
       }
     }
     if (!strcmp(name, "update_on_server")) {
@@ -123,6 +131,8 @@ class LocalModel : public ISharedModel<xpu, DType> {
     if (!strcmp(name, "test_on_server")) {
       test_on_server = atoi(val);
     }
+    // ignore message parameter
+    if (!strncmp(name, "msg:", 4)) return;
     cfgvec.push_back(std::make_pair(std::string(name),
                                     std::string(val)));
   }
@@ -132,8 +142,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
     if (p == NULL || p->wait.size() == 0) return;
     PullEntry &e = *p;
     // wake up waiters if any
-    utils::Assert(e.wait.size() == devices.size(),
-                  "PullWait: must initialize the wait");
+    CHECK_EQ(e.wait.size(), devices.size()) << "PullWait: must initialize the wait";
     PullWaitRecord &w = e.wait[wid];
     if (!w.finished) {
       wait_lock.Lock();
@@ -142,22 +151,20 @@ class LocalModel : public ISharedModel<xpu, DType> {
         wait_cond.Wait(&wait_lock);
       }
       w.nwait -= 1;
-      utils::Assert(w.nwait >= 0, "boundary check");
+      CHECK_GE(w.nwait, 0) << "boundary check";
       wait_lock.Unlock();
     }
   }
   virtual void Init(const std::vector<int> &devices) {
-    utils::Check(init_end == 0,
-                 "LocalServer.Init can only call Init once");
-    utils::Check(devices.size() != 0,
-                 "LocalServer.Init: must at least contain 1 devices");
+    CHECK_EQ(init_end, 0) << "LocalServer.Init can only call Init once";
+    CHECK_NE(devices.size(), 0) << "LocalServer.Init: must at least contain 1 devices";
     this->devices = devices;
     destroy_signal = false;
     // initialize device id to local index
     dev2index.clear();
     for (size_t i = 0; i < devices.size(); ++i) {
       int devid = devices[i];
-      utils::Assert(devid >= 0, "device id must be bigger than 0");
+      CHECK_GE(devid, 0) << "device id must be bigger than 0";
       if (devid >= static_cast<int>(dev2index.size())) {
         dev2index.resize(devid + 1, -1);
       }
@@ -173,7 +180,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
       push_queues.resize(1);
     }
     for (size_t i = 0; i < push_queues.size(); ++i) {
-      push_queues[i].Init();
+      push_queues[i].Init(use_fifo_push_queue != 0);
     }
     push_map.Init();
     push_lock.Init();
@@ -225,15 +232,14 @@ class LocalModel : public ISharedModel<xpu, DType> {
                           int devid) {
     PushEntry &e = push_map.GetRef(key);
     Stream<xpu> s;
-    push_lock.Lock();    
+    push_lock.Lock();
     mshadow::Copy(e.weight, data, &s);
     push_lock.Unlock();
   }
   virtual void CheckWeight_(Tensor<xpu, 2, DType> data,
                             int key,
                             int devid) {
-    utils::Check(test_on_server != 0,
-                 "must be in pair debug mode");
+    CHECK_NE(test_on_server, 0) << "must be in pair debug mode";
     PushEntry &e = push_map.GetRef(key);
     mshadow::TensorContainer<cpu, 2, DType> tmp(false);
     tmp.Resize(data.shape_);
@@ -262,6 +268,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
       fprintf(stderr, "PSLocal:key=%d,dev=%d:check pass\n", key, devid);
     }
   }
+
  protected:
   /*! \brief operation performed locally in PS */
   enum LocalOp {
@@ -294,10 +301,8 @@ class LocalModel : public ISharedModel<xpu, DType> {
                         CallbackFunction callback,
                         void *callback_arg) {
     PullEntry &e = pull_map.GetRef(key);
-    utils::Assert(e.req.size() == devices.size(),
-                  "PullReq: must initialize the key, req");
-    utils::Assert(e.wait.size() == devices.size(),
-                  "PullReq: must initialize the key, wait");
+    CHECK_EQ(e.req.size(), devices.size()) << "PullReq: must initialize the key, req";
+    CHECK_EQ(e.wait.size(), devices.size()) << "PullReq: must initialize the key, wait";
     const int wid = GetWorkIndex(devid);
     PullReqRecord &r = e.req[wid];
     r.dest = data;
@@ -310,9 +315,8 @@ class LocalModel : public ISharedModel<xpu, DType> {
     wait_lock.Unlock();
     // check ready event
     request_lock.Lock();
-    utils::Check(!r.pending,
-                 "key = %d, cannot send duplicate pull request before it finishes",
-                 key);
+    CHECK_EQ(!r.pending, true) << "key = " << key
+      << "cannot send duplicate pull request before it finishes";
     if (e.req[wid].ready) {
       if (perdev_pull_thread != 0) {
         pull_queues[wid].Push(std::make_pair(key, devid));
@@ -331,8 +335,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
    */
   virtual void PullReady(Tensor<cpu, 2> data, int key) {
     PullEntry &e = pull_map.GetRef(key);
-    utils::Assert(e.req.size() == devices.size(),
-                  "PullReady: must initialize the key, req");
+    CHECK_EQ(e.req.size(), devices.size()) << "PullReady: must initialize the key, req";
     request_lock.Lock();
     e.src = data;
     for (index_t i = 0; i < e.req.size(); ++i) {
@@ -361,11 +364,11 @@ class LocalModel : public ISharedModel<xpu, DType> {
    * \brief event handler for push finish
    *  called when all the data with same key comes int
    * \param data the buffer holds the data in all devices
-   * \param result_buffer temporal buffer to hold the reduction result
    * \param key the key of the data
    */
   virtual void HandlePushFinish(Tensor<cpu, 3, DType> data,
                                 int key) {
+    // LOG(ERROR) << dbstr(data);
     LocalOp op = kSum;
     typename std::map<int, LocalOp>::const_iterator
         it = push_operation.find(key);
@@ -377,11 +380,11 @@ class LocalModel : public ISharedModel<xpu, DType> {
       this->ReduceSum(data);
       custom_server->Update(key, data[0].dptr_, data[0].MSize());
       if (update_on_server != 0) {
-        PushEntry &e = push_map.GetRef(key);      
+        PushEntry &e = push_map.GetRef(key);
         this->PullReady(e.weight, key);
       } else {
-        utils::Assert(test_on_server != 0, "test mode");
-        this->PullReady(data[0], key);        
+        CHECK_NE(test_on_server, 0) << "test mode";
+        this->PullReady(data[0], key);
       }
       return;
     }
@@ -395,10 +398,30 @@ class LocalModel : public ISharedModel<xpu, DType> {
         this->PullReady(data.FlatTo2D(), key);
         return;
       }
-      default: utils::Error("unknown LocalOp");
+      default: LOG(FATAL) << "unknown LocalOp";
     }
   }
-
+  /*!
+   * \brief event handler for reduce finish
+   *  called when all the data with same key finishes the reduction
+   * \param data the buffer holds the reduction result
+   * \param key the key of the data
+   */
+  inline void HandleReduceFinish(Tensor<cpu, 2, DType> data,
+                                 int key) {
+    if (custom_server != NULL) {
+      custom_server->Update(key, data.dptr_, data.MSize());
+      if (update_on_server != 0) {
+        PushEntry &e = push_map.GetRef(key);
+        this->PullReady(e.weight, key);
+      } else {
+        CHECK_NE(test_on_server, 0) << "test mode";
+        this->PullReady(data, key);
+      }
+    } else {
+      this->PullReady(data, key);
+    }
+  }
   virtual void InitCustomerServer(void) {
     if (update_on_server != 0 || test_on_server != 0) {
       custom_server = CreateModelUpdater<DType>();
@@ -406,12 +429,37 @@ class LocalModel : public ISharedModel<xpu, DType> {
         custom_server->SetParam(cfgvec[j].first.c_str(),
                                 cfgvec[j].second.c_str());
       }
-      custom_server->InitUpdater(0, std::string());
+      custom_server->InitUpdater(0, 0, NULL);
     }
   }
+
  protected:
   // customized server
   IModelUpdater<DType> *custom_server;
+  // whether use fifo push queue
+  int use_fifo_push_queue;
+
+  // perform sum reduction
+  inline void ReduceSum(Tensor<cpu, 3, DType> data) {
+    #if defined(_OPENMP)
+    if (data[0].MSize() >= bigarray_bound &&
+        nthread_reduction != 0) {
+      ms_omp_uint ntask = static_cast<ms_omp_uint>(data.size(1));
+      #pragma omp parallel for schedule(static) num_threads(nthread_reduction)
+      for (ms_omp_uint j = 0; j < ntask; ++j) {
+        for (index_t i = 1; i < data.size(0); ++i) {
+          data[0][j] += data[i][j];
+        }
+      }
+    } else  //NOLINT(*)
+      #endif
+    {
+      for (index_t i = 1; i < data.size(0); ++i) {
+        data[0] += data[i];
+      }
+    }
+  }
+
  private:
   /*! \brief task running */
   struct PullTask {
@@ -475,8 +523,8 @@ class LocalModel : public ISharedModel<xpu, DType> {
         mshadow::AllocSpace(&data, false);
         if (need_weight) mshadow::AllocSpace(&weight);
       }
-      utils::Assert(data.CheckContiguous(), "Init");
-      utils::Assert(!need_weight || weight.CheckContiguous(), "Init");
+      CHECK_EQ(data.CheckContiguous(), true) << "Data must be contiguous";
+      CHECK(!need_weight || weight.CheckContiguous()) << "Weight must be contiguous";
       num_copied = 0;
       copied.resize(ndevice, false);
     }
@@ -555,7 +603,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
   utils::Mutex wait_lock;
   // conditional variable to do waiting
   utils::ConditionVariable wait_cond;
-  //---------configurations of server-------
+  // ---------configurations of server-------
   int init_end;
   // whether perform update on serverside
   int update_on_server;
@@ -573,26 +621,6 @@ class LocalModel : public ISharedModel<xpu, DType> {
   int perdev_push_thread;
   /*! \brief history of configurations */
   std::vector< std::pair<std::string, std::string> > cfgvec;
-  // perform sum reduction
-  inline void ReduceSum(Tensor<cpu, 3, DType> data) {
-    #if defined(_OPENMP)
-    if (data[0].MSize() >= bigarray_bound &&
-        nthread_reduction != 0) {
-      ms_omp_uint ntask = static_cast<ms_omp_uint>(data.size(1));
-      #pragma omp parallel for schedule(static) num_threads(nthread_reduction)
-      for (ms_omp_uint j = 0; j < ntask; ++j) {
-        for (index_t i = 1; i < data.size(0); ++i) {
-          data[0][j] += data[i][j];
-        }
-      }
-    } else
-      #endif
-    {
-      for (index_t i = 1; i < data.size(0); ++i) {
-        data[0] += data[i];
-      }
-    }
-  }
   // push handler
   inline void PushProc(utils::ThreadPQueue<PullTask> *queue) {
     while (!destroy_signal) {
@@ -600,9 +628,12 @@ class LocalModel : public ISharedModel<xpu, DType> {
       if (queue->Pop(&tsk)) {
         const int wid = GetWorkIndex(tsk.devid);
         PushEntry &e = push_map.GetRef(tsk.key);
-        utils::Check(e.data[0][0].shape_ == tsk.data.shape_,
-                     "Tensor with same key must share same shape");
-        utils::Assert(!e.copied[wid], "data inconsistency");
+        CHECK_EQ(e.data[0][0].shape_, tsk.data.shape_)
+          << "Tensor with same key must share same shape "
+          << e.data[0][0].shape_
+          << " vs "
+          << tsk.data.shape_;
+        CHECK_EQ(!e.copied[wid], true) << "data inconsistency";
         // start copy
         SetDevice<xpu>(tsk.devid);
         Copy(e.data[e.copyin_version][wid], tsk.data, push_stream[wid]);
@@ -625,7 +656,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
           this->HandlePushFinish(e.data[cp_version], tsk.key);
         }
       } else {
-        utils::Assert(destroy_signal, "abort but not destroy");
+        CHECK_EQ(destroy_signal, true) << "abort but not destroy";
       }
     }
   }
@@ -643,9 +674,8 @@ class LocalModel : public ISharedModel<xpu, DType> {
     }
   }
   inline void PushHandlerLocal(size_t tid) {
-    utils::Assert(tid < devices.size(), "threadid exceed boundary");
-    utils::Assert(push_queues.size() == devices.size(),
-                  "must have one pull_queue per device");
+    CHECK_LT(tid, devices.size()) << "threadid exceed boundary";
+    CHECK_EQ(push_queues.size(), devices.size()) << "must have one pull_queue per device";
     // allocate stream resources
     SetDevice<xpu>(devices[tid]);
     push_stream[tid] = NewStream<xpu>();
@@ -664,7 +694,6 @@ class LocalModel : public ISharedModel<xpu, DType> {
         = static_cast<std::pair<LocalModel*, size_t>*>(arg);
     p->first->PushHandlerLocal(p->second);
     delete p;
-    utils::ThreadExit(NULL);
     return NULL;
   }
   // push handler procedure
@@ -678,8 +707,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
         PullEntry &e = pull_map.GetRef(key);
         {
           // handle request
-          utils::Assert(e.req.size() == devices.size(),
-                        "PullHandler: must initialize the key, req");
+          CHECK_EQ(e.req.size(), devices.size()) << "PullHandler: must initialize the key, req";
           PullReqRecord &r = e.req[wid];
           SetDevice<xpu>(devid);
           Copy(r.dest, e.src, pull_stream[wid]);
@@ -692,8 +720,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
         }
         {
           // wake up waiters if any
-          utils::Assert(e.wait.size() == devices.size(),
-                        "PullHandler, must initialize the key, req");
+          CHECK_EQ(e.wait.size(), devices.size()) << "PullHandler, must initialize the key, req";
           PullWaitRecord &w = e.wait[wid];
           wait_lock.Lock();
           w.finished = true;
@@ -703,7 +730,7 @@ class LocalModel : public ISharedModel<xpu, DType> {
           wait_lock.Unlock();
         }
       } else {
-        utils::Assert(destroy_signal, "abort but not destroy");
+        CHECK_EQ(destroy_signal, true) << "abort but not destroy";
       }
     }
   }
@@ -722,9 +749,8 @@ class LocalModel : public ISharedModel<xpu, DType> {
     }
   }
   inline void PullHandlerLocal(size_t tid) {
-    utils::Assert(tid < devices.size(), "threadid exceed boundary");
-    utils::Assert(pull_queues.size() == devices.size(),
-                  "must have one pull_queue per device");
+    CHECK_LT(tid, devices.size()) << "threadid exceed boundary";
+    CHECK_EQ(pull_queues.size(), devices.size()) << "must have one pull_queue per device";
     // allocate stream resources
     SetDevice<xpu>(devices[tid]);
     pull_stream[tid] = NewStream<xpu>();
@@ -735,7 +761,6 @@ class LocalModel : public ISharedModel<xpu, DType> {
   /*!\brief entry point of pull thread, one thread for all devices */
   inline static MSHADOW_THREAD_PREFIX PullGlobalThread(void *arg) {
     static_cast<LocalModel*>(arg)->PullHandlerGlobal();
-    utils::ThreadExit(NULL);
     return NULL;
   }
   inline static MSHADOW_THREAD_PREFIX PullLocalThread(void *arg) {
@@ -743,15 +768,13 @@ class LocalModel : public ISharedModel<xpu, DType> {
         = static_cast<std::pair<LocalModel*, size_t>*>(arg);
     p->first->PullHandlerLocal(p->second);
     delete p;
-    utils::ThreadExit(NULL);
     return NULL;
   }
   // get internal index of device
   inline int GetWorkIndex(int devid) const {
-    utils::Check(devid >= 0 &&
-                 devid < static_cast<int>(dev2index.size()) &&
-                 dev2index[devid] >= 0,
-                 "Push: invalid devid");
+    CHECK(devid >= 0 &&
+          devid < static_cast<int>(dev2index.size()) &&
+          dev2index[devid] >= 0) << "Push: invalid devid";
     return dev2index[devid];
   }
   // functions to handle pull
@@ -788,4 +811,4 @@ class LocalModel : public ISharedModel<xpu, DType> {
 };
 }  // namespace ps
 }  // namespace mshadow
-#endif // MSHADOW_PS_LOCAL_INL_H_
+#endif // MSHADOW_PS_LOCAL_INL_H_  NOLINT(*)

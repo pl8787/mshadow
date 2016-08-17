@@ -3,10 +3,10 @@
 #
 #  This is configuration script that you can use to compile mshadow
 #  Usage:
-# 
+#
 #  include config.mk in your Makefile, or directly include the definition of variables
 #  include mshadow.mk after the variables are set
-#  
+#
 #  Add MSHADOW_CFLAGS to the compile flags
 #  Add MSHADOW_LDFLAGS to the linker flags
 #  Add MSHADOW_NVCCFLAGS to the nvcc compile flags
@@ -22,14 +22,18 @@ USE_CUDA_PATH = NONE
 #
 # choose the version of blas you want to use
 # can be: mkl, blas, atlas, openblas, apple
-USE_BLAS = atlas
+USE_BLAS = blas
 #
 # add path to intel library, you may need it
 # for MKL, if you did not add the path to enviroment variable
-# 
+#
 USE_INTEL_PATH = NONE
 
 # whether compile with parameter server
 USE_DIST_PS = 0
 PS_PATH = NONE
 PS_THIRD_PATH = NONE
+
+# whether compile with rabit allreduce
+USE_RABIT_PS = 0
+RABIT_PATH = NONE

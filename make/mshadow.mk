@@ -19,7 +19,7 @@ else
 endif
 ifneq ($(USE_CUDA_PATH), NONE)
 	MSHADOW_CFLAGS += -I$(USE_CUDA_PATH)/include
-	MSHADOW_LDFLAGS += -L$(USE_CUDA_PATH)/lib64
+	MSHADOW_LDFLAGS += -L$(USE_CUDA_PATH)/lib64 -L$(USE_CUDA_PATH)/lib
 endif
 
 ifeq ($(USE_BLAS), mkl)
@@ -45,8 +45,11 @@ else
 	MSHADOW_LDFLAGS += -lmkl_intel_lp64 -lmkl_intel_thread -lmkl_core -liomp5
 endif
 else
+ifneq ($(USE_BLAS), NONE)
 	MSHADOW_CFLAGS += -DMSHADOW_USE_CBLAS=1 -DMSHADOW_USE_MKL=0
 endif
+endif
+
 ifeq ($(USE_BLAS), openblas)
 	MSHADOW_LDFLAGS += -lopenblas
 else ifeq ($(USE_BLAS), atlas)
@@ -59,19 +62,40 @@ else ifeq ($(USE_BLAS), apple)
 endif
 
 ifeq ($(PS_PATH), NONE)
-PS_PATH = ..
+	PS_PATH = ..
 endif
 ifeq ($(PS_THIRD_PATH), NONE)
-PS_THIRD_PATH = $(PS_PATH)/third_party
+	PS_THIRD_PATH = $(PS_PATH)/third_party
+endif
+
+ifndef RABIT_PATH
+	RABIT_PATH = rabit
+endif
+
+ifeq ($(RABIT_PATH), NONE)
+	RABIT_PATH = rabit
+endif
+
+ifeq ($(USE_RABIT_PS),1)
+	MSHADOW_CFLAGS += -I$(RABIT_PATH)/include
+	MSHADOW_LDFLAGS += -L$(RABIT_PATH)/lib -lrabit_base
+	MSHADOW_CFLAGS += -DMSHADOW_RABIT_PS=1
+else
+	MSHADOW_CFLAGS += -DMSHADOW_RABIT_PS=0
 endif
 
 ifeq ($(USE_DIST_PS),1)
 MSHADOW_CFLAGS += -DMSHADOW_DIST_PS=1 -std=c++11 \
 	-I$(PS_PATH)/src -I$(PS_THIRD_PATH)/include
-PS_LIB = $(addprefix $(PS_PATH)/build/, libps.a libpsmain.a) \
+PS_LIB = $(addprefix $(PS_PATH)/build/, libps.a libps_main.a) \
 	$(addprefix $(PS_THIRD_PATH)/lib/, libgflags.a libzmq.a libprotobuf.a \
 	libglog.a libz.a libsnappy.a)
+	# -L$(PS_THIRD_PATH)/lib -lgflags -lzmq -lprotobuf -lglog -lz -lsnappy
 MSHADOW_NVCCFLAGS += --std=c++11
 else
 	MSHADOW_CFLAGS+= -DMSHADOW_DIST_PS=0
 endif
+
+# Set MSDHADOW_USE_PASCAL to one to enable nvidia pascal gpu features.
+# Like cublasHgemm
+MSHADOW_CFLAGS += -DMSDHADOW_USE_PASCAL=0

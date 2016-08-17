@@ -11,6 +11,8 @@
  */
 #ifndef MSHADOW_TENSOR_H_
 #define MSHADOW_TENSOR_H_
+#include <string>
+#include <iostream>
 #include "./base.h"
 #include "./expression.h"
 
@@ -29,11 +31,20 @@ struct gpu {
   /*! \brief device flag number, identifies this device */
   static const int kDevMask = 1 << 1;
 };
+template<int ndim>
+struct Shape;
+
+/*!
+ * \brief allow string printing of the shape
+ * \param os the output stream
+ * \param shape the shape
+ * \return the ostream
+ */
+template<int ndim>
+inline std::ostream &operator<<(std::ostream &os, const Shape<ndim> &shape); // NOLINT(*)
+
 /*!
  * \brief shape of a tensor
- *       IMPORTANT NOTE: this shape is different from numpy.shape
- *       shape[0] gives the lowest dimension, shape[dimension-1] gives the highest dimension
- *       shape[k] corresponds to k-th dimension of tensor
  * \tparam dimension dimension of tensor
  */
 template<int dimension>
@@ -52,7 +63,7 @@ struct Shape {
     for (int i = 0; i < kDimension; ++i) {
       this->shape_[i] = s[i];
     }
-  }  
+  }
   /*!
    * \brief get corresponding index
    * \param idx dimension index
@@ -70,7 +81,7 @@ struct Shape {
     return shape_[idx];
   }
   /*!
-   * \return whether two shape equals 
+   * \return whether two shape equals
    * \param s the shape to compare against
    */
   MSHADOW_XINLINE bool operator==(const Shape<kDimension> &s) const {
@@ -79,6 +90,13 @@ struct Shape {
       if (s.shape_[i] != this->shape_[i]) return false;
     }
     return true;
+  }
+  /*!
+   * \return whether two shape not equal
+   * \param s the shape to compare against
+   */
+  MSHADOW_XINLINE bool operator!=(const Shape<kDimension> &s) const {
+    return !(*this == s);
   }
   /*!
    * flatten the higher dimension to second dimension, return a 2D shape
@@ -145,6 +163,10 @@ v   * \return subshape
     }
     return s;
   }
+  //! \cond Doxygen_Suppress
+  template<int dim>
+  friend std::ostream &operator<<(std::ostream &os, const Shape<dim> &shape); // NOLINT(*)
+  //! \endcond
 };  // Shape
 //------------------------------------------------
 // useful construction functions to generate shape
@@ -195,6 +217,21 @@ MSHADOW_XINLINE Shape<4> Shape4(index_t s0, index_t s1,
   return s;
 }
 /*!
+* \brief construct a five dimension shape, stride will equal s0
+* \param s0 size of dimension 0
+* \param s1 size of dimension 1
+* \param s2 size of dimension 2
+* \param s3 size of dimension 3
+* \param s4 size of dimension 4
+* \return the shape construction
+*/
+MSHADOW_XINLINE Shape<5> Shape5(index_t s0, index_t s1, index_t s2,
+                                index_t s3, index_t s4) {
+  Shape<5> s;
+  s[0] = s0; s[1] = s1; s[2] = s2; s[3] = s3; s[4] = s4;
+  return s;
+}
+/*!
  * \brief computaion stream structure, used for asynchronize computation
  */
 template<typename Device>
@@ -213,6 +250,8 @@ struct Stream {
   inline bool CheckIdle(void) {
     return true;
   }
+  /*! \brief create a blas handle */
+  inline void CreateBlasHandle() {}
 };
 /*!
  * \brief Tensor RValue, this is the super type of all kinds of possible tensors
@@ -271,6 +310,10 @@ struct Tensor: public TRValue<Tensor<Device, dimension, DType>,
   /*! \brief constructor from data pointer and shape, without stride */
   MSHADOW_XINLINE Tensor(DType *dptr, const Shape<dimension> &shape)
       : dptr_(dptr), shape_(shape), stride_(shape[kSubdim]), stream_(NULL) {}
+  /*! \brief constructor from data pointer and shape, without stride */
+  MSHADOW_XINLINE Tensor(DType *dptr, const Shape<dimension> &shape,
+                         Stream<Device> *stream)
+    : dptr_(dptr), shape_(shape), stride_(shape[kSubdim]), stream_(stream) {}
   /*! \brief constructor from data pointer and shape  */
   MSHADOW_XINLINE Tensor(DType *dptr,
                          const Shape<dimension> &shape,
@@ -383,6 +426,8 @@ struct Tensor<Device, 1, DType>:
       : shape_(shape), stream_(NULL) {}
   MSHADOW_XINLINE Tensor(DType *dptr, Shape<1> shape)
       : dptr_(dptr), shape_(shape), stride_(shape[0]), stream_(NULL) {}
+  MSHADOW_XINLINE Tensor(DType *dptr, Shape<1> shape, Stream<Device> *stream)
+      : dptr_(dptr), shape_(shape), stride_(shape[0]), stream_(stream) {}
   MSHADOW_XINLINE Tensor(DType *dptr, Shape<1> shape,
                          index_t stride, Stream<Device> *stream)
       : dptr_(dptr), shape_(shape), stride_(stride), stream_(stream) {}
@@ -459,11 +504,19 @@ template<typename Device>
 inline void SetDevice(int devid);
 /*!
  * \brief create a new stream from system
+ * \param create_blas_handle whether create blas handle in stream
+ * \param create_dnn_handle whether create cudnn handle in stream
  * \return a pointer to the created stream
  * \tparam Device the device type
  */
 template<typename Device>
-inline Stream<Device> *NewStream(void);
+inline Stream<Device> *NewStream(bool create_blas_handle,
+                                 bool create_dnn_handle);
+/*! \brief default behavior: create cublas handle */
+template<typename Device>
+inline Stream<Device> *NewStream() {
+  return NewStream<Device>(true, false);
+}
 /*!
  * \brief delete the computing stream
  * \param stream the stream parameter to be deleted
@@ -484,7 +537,17 @@ inline void DeleteStream(Stream<Device> *stream);
 template<int dim, typename DType>
 inline void AllocSpace(Tensor<cpu, dim, DType> *obj,
                        bool pad = MSHADOW_ALLOC_PAD);
-/*! \brief refer to comment of cpu ver \sa AllocSpace */
+/*!
+ * \brief CPU/CPU: allocate space for CTensor, according to the shape in the obj
+ *        this function is responsible to set the stride_ in each obj.shape
+ * \param obj the tensor object, with shape specified
+ * \param pad whether padding dimension 0, to make last dimension aligned,
+ *            padding may help improve efficiency of matrix multiplications
+ *            if true, will allocate space with stride_ that may not equals shape[0]
+ *            if false, will allocate continuous space
+ * \tparam dim specify the dim of tensor
+ * \tparam DType type of element in tensor
+ */
 template<int dim, typename DType>
 inline void AllocSpace(Tensor<gpu, dim, DType> *obj,
                        bool pad = MSHADOW_ALLOC_PAD);
@@ -496,7 +559,12 @@ inline void AllocSpace(Tensor<gpu, dim, DType> *obj,
  */
 template<int dim, typename DType>
 inline void FreeSpace(Tensor<cpu, dim, DType> *obj);
-/*! \brief refer to comment of cpu ver \sa FreeSpace */
+/*!
+ * \brief CPU/GPU: free the space of tensor, will set obj.dptr to NULL
+ * \param obj the tensor object
+ * \tparam dim specify the dim of tensor
+ * \tparam DType type of element in tensor
+ */
 template<int dim, typename DType>
 inline void FreeSpace(Tensor<gpu, dim, DType> *obj);
 /*!
@@ -504,15 +572,18 @@ inline void FreeSpace(Tensor<gpu, dim, DType> *obj);
  * \param shape: shape of tensor
  * \param initv: initialization value
  * \param pad : padding option
+ * \param stream : stream of tensor
  * \tparam Device device of tensor
  * \tparam DType type of element in tensor
  * \tparam dim dimention of tensor
+ * \return a new allocated tensor
  * \sa AllocSpace
  */
 template<typename Device, typename DType, int dim>
 inline Tensor<Device, dim, DType> NewTensor(const Shape<dim> &shape,
                                             DType initv,
-                                            bool pad = MSHADOW_ALLOC_PAD);
+                                            bool pad = MSHADOW_ALLOC_PAD,
+                                            Stream<Device> *stream = NULL);
 /*!
  * \brief copy data from one tensor to another, with same shape
  * \param dst target tensor
@@ -525,17 +596,38 @@ template<int dim, typename DType>
 inline void Copy(Tensor<cpu, dim, DType> dst,
                  const Tensor<cpu, dim, DType> &src,
                  Stream<cpu> *stream = NULL);
-/*! \brief refer to comment of cpu ver \sa Copy */
+/*!
+ * \brief copy data from one tensor to another, with same shape
+ * \param dst target tensor
+ * \param src source tensor
+ * \param stream the stream, when specified, the copy can exhibit asynchronize behavior
+ * \tparam dim specify the dim of tensor
+ * \tparam DType type of element in tensor
+ */
 template<int dim, typename DType>
 inline void Copy(Tensor<cpu, dim, DType> dst,
                  const Tensor<gpu, dim, DType> &src,
                  Stream<gpu> *stream = NULL);
-/*! \brief refer to comment of cpu ver \sa Copy */
+/*!
+ * \brief copy data from one tensor to another, with same shape
+ * \param dst target tensor
+ * \param src source tensor
+ * \param stream the stream, when specified, the copy can exhibit asynchronize behavior
+ * \tparam dim specify the dim of tensor
+ * \tparam DType type of element in tensor
+ */
 template<int dim, typename DType>
 inline void Copy(Tensor<gpu, dim, DType> dst,
                  const Tensor<cpu, dim, DType> &src,
                  Stream<gpu> *stream = NULL);
-/*! \brief refer to comment of cpu ver \sa Copy */
+/*!
+ * \brief copy data from one tensor to another, with same shape
+ * \param dst target tensor
+ * \param src source tensor
+ * \param stream the stream, when specified, the copy can exhibit asynchronize behavior
+ * \tparam dim specify the dim of tensor
+ * \tparam DType type of element in tensor
+ */
 template<int dim, typename DType>
 inline void Copy(Tensor<gpu, dim, DType> dst,
                  const Tensor<gpu, dim, DType> &src,
@@ -547,9 +639,111 @@ inline void Copy(Tensor<gpu, dim, DType> dst,
  */
 template<typename DType>
 inline void Softmax(Tensor<cpu, 2, DType> dst, const Tensor<cpu, 2, DType> &energy);
-/*! \brief refer to comment of cpu ver \sa Softmax */
+/*!
+ * \brief CPU/GPU: normalize softmax: dst[i][j] = exp(energy[i][j]) /(sum_j exp(energy[i][j]))
+ * \param dst destination
+ * \param energy input energy
+ */
 template<typename DType>
 inline void Softmax(Tensor<gpu, 2, DType> dst, const Tensor<gpu, 2, DType> &energy);
+
+/*!
+ * \brief CPU/GPU: softmax gradient
+ * \param dst destination
+ * \param src source output
+ * \param label label info
+ */
+template<typename DType>
+inline void SoftmaxGrad(Tensor<cpu, 2, DType> dst,
+                        const Tensor<cpu, 2, DType> &src,
+                        const Tensor<cpu, 1, DType> &label);
+/*!
+ * \brief CPU/GPU: softmax gradient
+ * \param dst destination
+ * \param src source output
+ * \param label label info
+ */
+template<typename DType>
+inline void SoftmaxGrad(Tensor<gpu, 2, DType> dst,
+                        const Tensor<gpu, 2, DType> &src,
+                        const Tensor<gpu, 1, DType> &label);
+/*!
+ * \brief CPU/GPU: Gradient accumulate of embedding matrix. dst += take_grad(src, index)
+                   Called when the featuredim of src is much larger than the batchsize
+ * \param dst destination
+ * \param index index to take
+ * \param src source output
+ */
+template<typename IndexType, typename DType>
+inline void AddTakeGrad(Tensor<cpu, 2, DType> dst,
+                        const Tensor<cpu, 1, IndexType>& index,
+                        const Tensor<cpu, 2, DType> &src);
+/*!
+ * \brief CPU/GPU: Gradient accumulate of embedding matrix. dst += take_grad(src, index)
+                   Called when the featuredim of src is much larger than the batchsize
+ * \param dst destination
+ * \param index index to take
+ * \param src source output
+ */
+template<typename IndexType, typename DType>
+inline void AddTakeGrad(Tensor<gpu, 2, DType> dst,
+                        const Tensor<gpu, 1, IndexType>& index,
+                        const Tensor<gpu, 2, DType> &src);
+/*!
+ * \brief CPU/GPU: Gradient accumulate of embedding matrix. dst += take_grad(src, index)
+                   Called when the batchsize of src is larger than the featuredim
+ * \param dst destination
+ * \param sorted the sorted indices
+ * \param index original index of the sorted indices
+ * \param src source output
+ */
+template<typename IndexType, typename DType>
+inline void AddTakeGradLargeBatch(Tensor<cpu, 2, DType> dst,
+                                  const Tensor<gpu, 1, IndexType>& sorted,
+                                  const Tensor<cpu, 1, IndexType>& index,
+                                  const Tensor<cpu, 2, DType> &src);
+/*!
+ * \brief CPU/GPU: Gradient accumulate of embedding matrix. dst += take_grad(src, index)
+                   Called when the batchsize of src is larger than the featuredim
+ * \param dst destination
+ * \param sorted the sorted indices
+ * \param index original index of the sorted indices
+ * \param src source output
+ */
+template<typename IndexType, typename DType>
+inline void AddTakeGradLargeBatch(Tensor<gpu, 2, DType> dst,
+                                  const Tensor<gpu, 1, IndexType>& sorted,
+                                  const Tensor<gpu, 1, IndexType>& index,
+                                  const Tensor<gpu, 2, DType> &src);
+/*!
+* \brief CPU/GPU: Sort key-value pairs stored in separate places. (Stable sort is performed!)
+* \param keys the keys to sort
+* \param values the values that sorts w.r.t the key
+* \param is_ascend whether to sort key in ascending order
+*/
+template<typename KDType, typename VDType>
+inline void SortByKey(Tensor<cpu, 1, KDType> keys, Tensor<cpu, 1, VDType> values,
+                      bool is_ascend = true);
+/*!
+ * \brief CPU/GPU: Sort key-value pairs stored in separate places. (Stable sort is performed!)
+ * \param keys the keys to sort
+ * \param values the values that sorts w.r.t the key
+ * \param is_ascend whether to sort key in ascending order
+ */
+template<typename KDType, typename VDType>
+inline void SortByKey(Tensor<gpu, 1, KDType> keys, Tensor<gpu, 1, VDType> values,
+                      bool is_ascend = true);
+/*!
+ * \brief CPU/GPU: Sort the keys within each segment. (Stable sort is performed!)
+                   Segments is defined as an ascending ordered vector like [0, 0, 0, 1, 1, 2, 3, 3, 3,...]
+                   We sort separately the keys labeled by 0 and 1, 2, 3, etc.
+                   Currently only supports sorting in ascending order !!
+ * \param values the data to sort
+ * \param segments segment indicator
+ */
+template<typename Device, typename VDType, typename SDType>
+inline void VectorizedSort(Tensor<Device, 1, VDType> values, Tensor<Device, 1, SDType> segments);
+
 // function declarations to support expression, no need to understand them
 // these functions do not need to be directly used
 /*!
@@ -568,7 +762,18 @@ template<typename Saver, typename R, int dim,
          typename DType, typename E, int etype>
 inline void MapExp(TRValue<R, cpu, dim, DType> *dst,
                    const expr::Exp<E, DType, etype> &exp);
-/*! \brief refer to comment of cpu ver \sa MapExp */
+/*!
+ * \brief CPU/GPU: map a expression to a tensor, this function calls MapPlan
+ * \tparam Saver specify storage method
+ * \tparam R specifies the storage type of the tensor
+ * \tparam dim dim of the tensor, during usage, there is no need to specify this parameter
+ * \tparam DType the type of elements in the tensor
+ * \tparam E specifies the expression type, not need to specify this parameter during usage
+ * \tparam etype expression type
+ * \param dst destination
+ * \param exp expression
+ * \sa namespace mshadow:sv, mshadow::op, mshadow::expr
+ */
 template<typename Saver, typename R, int dim,
          typename DType, typename E, int etype>
 inline void MapExp(TRValue<R, gpu, dim, DType> *dst,
@@ -591,7 +796,19 @@ template<typename Saver, typename Reducer,
 inline void MapReduceKeepLowest(TRValue<R, cpu, 1, DType> *dst,
                                 const expr::Exp<E, DType, etype> &exp,
                                 DType scale = 1);
-/*! \brief refer to comment of cpu ver \sa MapReduceKeepLowest */
+/*!
+ * \brief CPU/GPU: map a expression, do reduction to 1D Tensor in lowest dimension (dimension 0)
+ * \tparam Saver specify storage method
+ * \tparam Reducer specify a reducer method
+ * \tparam R specifies the storage type of the tensor
+ * \tparam DType the type of elements in the tensor
+ * \tparam E specifies the expression type, not need to specify this parameter during usage
+ * \tparam etype expression type
+ * \param dst destination
+ * \param exp expression
+ * \param scale scale the result before save
+ * \sa namespace mshadow:sv, mshadow::op, mshadow::red, mshadow::expr
+ */
 template<typename Saver, typename Reducer, typename R,
          typename DType, typename E, int etype>
 inline void MapReduceKeepLowest(TRValue<R, gpu, 1, DType> *dst,
@@ -616,24 +833,64 @@ template<typename Saver, typename Reducer, int dimkeep,
 inline void MapReduceKeepHighDim(TRValue<R, cpu, 1, DType> *dst,
                                  const expr::Exp<E, DType, etype> &exp,
                                  DType scale = 1);
-/*! \brief refer to comment of cpu ver \sa MapReduceKeepHighDim */
+/*!
+ * \brief CPU/GPU: map a expression, do reduction to 1D Tensor in third dimension (dimension 2)
+ * \tparam Saver specify storage method
+ * \tparam Reducer specify a reducer method
+ * \tparam R specifies the storage type of the tensor
+ * \tparam DType the type of elements in the tensor
+ * \tparam dimkeep the target dimension to be kept, should be larger than 0, for 0, use MapReduceKeepLowest
+ * \tparam E specifies the expression type, not need to specify this parameter during usage
+ * \tparam etype expression type
+ * \param dst destination
+ * \param exp expression
+ * \param scale scale the result before save
+ * \sa namespace mshadow:sv, mshadow::op, mshadow::red, mshadow::expr
+ */
 template<typename Saver, typename Reducer, int dimkeep,
          typename R, typename DType, typename E, int etype>
 inline void MapReduceKeepHighDim(TRValue<R, gpu, 1, DType> *dst,
                                  const expr::Exp<E, DType, etype> &exp,
                                  DType scale = 1);
+/*!
+ * \brief CPU/GPU: 1 dimension vector dot
+ * \param dst Length 1 vector, used to hold the result.
+ * \param lhs Left operand vector
+ * \param rhs Right operand vector
+ */
+template<typename Device, typename DType>
+inline void VectorDot(Tensor<Device, 1, DType> dst,
+                      const Tensor<Device, 1, DType> &lhs,
+                      const Tensor<Device, 1, DType> &rhs);
+/*!
+ * \brief CPU/GPU: dst = alpha * op(lhs) op(rhs) + beta * dst
+ * \param dst Length 3 tensor, used to hold the result
+ * \param lhs Left operand vector
+ * \param rhs Right operand vector
+ * \param alpha multiplier of op(lhs)op(rhs)
+ * \param beta multiplier of dst
+ * \param workspace Workspace for casting DType* to DType** (batched-view), must have size >= 3 * batch_size
+ */
+template<bool transpose_left, bool transpose_right, typename Device, typename DType>
+inline void BatchGEMM(Tensor<Device, 3, DType> dst,
+                      const Tensor<Device, 3, DType> &lhs,
+                      const Tensor<Device, 3, DType> &rhs,
+                      DType alpha,
+                      DType beta,
+                      Tensor<Device, 1, DType*> workspace);
 }  // namespace mshadow
 // include headers
 #include "./stream_gpu-inl.h"
-#include "./expr_engine-inl.h"
 #include "./extension.h"
+#include "./expr_engine-inl.h"
 #include "./tensor_cpu-inl.h"
 #include "./tensor_gpu-inl.h"
 #include "./io.h"
 #include "./tensor_container.h"
+#include "./tensor_blob.h"
 #include "./random.h"
 // add definition of scalar related operators
-#ifdef MSAHDOW_SCALAR_
+#ifdef MSHADOW_SCALAR_
   #error "MSHADOW_SCALAR_ must not be defined"
 #endif
 // enumerate all the scalar data type we aim to be good at
@@ -644,6 +901,9 @@ inline void MapReduceKeepHighDim(TRValue<R, gpu, 1, DType> *dst,
 #include "./expr_scalar-inl.h"
 #undef MSHADOW_SCALAR_
 #define MSHADOW_SCALAR_ int
+#include "./expr_scalar-inl.h"
+#undef MSHADOW_SCALAR_
+#define MSHADOW_SCALAR_ mshadow::half::half_t
 #include "./expr_scalar-inl.h"
 #undef MSHADOW_SCALAR_
 #endif  // MSHADOW_TENSOR_H_

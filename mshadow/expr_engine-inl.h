@@ -8,13 +8,13 @@
 #define MSHADOW_EXPR_ENGINE_INL_H_
 #include <utility>
 #include <algorithm>
-#include "./utils.h"
+#include "./logging.h"
 #include "./expression.h"
 #include "./tensor.h"
 
 namespace mshadow {
 namespace expr {
-/*! 
+/*!
  * \brief a general class that allows extension that makes tensors of some shape
  * \tparam SubType type of subclass
  * \tparam SrcExp source expression of the MakeTensorExp, the source of operation
@@ -98,7 +98,7 @@ class Plan<TypecastExp<DstDType, SrcDType, EType, etype>, DstDType> {
  public:
   explicit Plan(const Plan<EType, SrcDType> &src) : src_(src) {}
   MSHADOW_XINLINE DstDType Eval(index_t y, index_t x) const {
-    return static_cast<DstDType>(src_.Eval(y, x));
+    return DstDType(src_.Eval(y, x));  // NOLINT(*)
   }
 
  private:
@@ -205,8 +205,8 @@ MakePlan(const BinaryMapExp<OP, TA, TB, DType, etype> &e) {
 // Static Type inference and Type Checking
 //----------------------------------------------------------------
 /*!
- * \brief static type inference template, 
- *        used to get the dimension of each expression, 
+ * \brief static type inference template,
+ *        used to get the dimension of each expression,
  *        if ExpInfo<E>::kDim == -1, this means here are mismatch in expression
  *        if (ExpInfo<E>::kDevMask & cpu::kDevMask) != 0, this means this expression can be assigned to cpu
  * \tparam E expression
@@ -229,7 +229,7 @@ struct ExpInfo<TransposeExp<E, DType> > {
 template<typename DstDType, typename SrcDType, typename EType, int etype>
 struct ExpInfo<TypecastExp<DstDType, SrcDType, EType, etype> > {
   static const int kDim = ExpInfo<EType>::kDim;
-  static const int kDevMask = ExpInfo<EType>::kDevMask;  
+  static const int kDevMask = ExpInfo<EType>::kDevMask;
 };
 template<typename Device, int dim, typename DType>
 struct ExpInfo<Tensor<Device, dim, DType> > {
@@ -312,7 +312,10 @@ template<int dim, typename DType>
 struct ShapeCheck<dim, ScalarExp<DType> > {
   inline static Shape<dim> Check(const ScalarExp<DType> &exp) {
     // use lowest dimension to mark scalar exp
-    Shape<dim> shape; shape[0] = 0;
+    Shape<dim> shape;
+    for (int i = 0; i < dim; ++i) {
+      shape[i] = 0;
+    }
     return shape;
   }
 };
@@ -361,8 +364,8 @@ struct ShapeCheck<dim, BinaryMapExp<OP, TA, TB, DType, etype> > {
     Shape<dim> shape2 = ShapeCheck<dim, TB>::Check(t.rhs_);
     if (shape1[0] == 0) return shape2;
     if (shape2[0] == 0) return shape1;
-    utils::Check(shape1 == shape2,
-                 "BinaryMapExp: Shapes of operands are not the same");
+    CHECK_EQ(shape1, shape2) << "BinaryMapExp: Shapes of operands are not the same, " <<
+      "Shape1=" << shape1 << ", Shape2=" << shape2;
     return shape1;
   }
 };
